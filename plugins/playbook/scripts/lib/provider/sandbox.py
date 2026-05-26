@@ -57,6 +57,102 @@ _HOME_RW_SUBPATHS: tuple[str, ...] = (
     "Library",
 )
 
+# Friendly model aliases — collapse "agent + canonical model" into one knob.
+# Loaded from JSON so agents can edit the table without a code release. Model
+# strings drift between releases (claude-opus-4-7 → 4-8, gpt-5.5 → 5.6, …);
+# updating `models.json` is enough.
+#
+# Resolution order:
+#   1. Plugin default: <this_file_dir>/models.json (ships with the plugin)
+#   2. Project override: <cwd>/.agent/models.json (writable from inside the
+#      sandbox, so agents can pin per-project versions)
+# Per-alias keys merge with the project file winning. Missing/malformed JSON
+# is non-fatal — falls back to empty {} and pattern inference still works.
+#
+# Schema (both files):
+#   {"aliases": {"<label>": ["<agent>", <model_or_null>, [<extras>...]]}}
+
+def _parse_models_json(path: Path) -> dict[str, tuple[str, str | None, tuple[str, ...]]]:
+    """Read one models.json. Returns {} on any parse/shape error."""
+    import json
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    aliases = raw.get("aliases", {})
+    if not isinstance(aliases, dict):
+        return {}
+    out: dict[str, tuple[str, str | None, tuple[str, ...]]] = {}
+    for label, entry in aliases.items():
+        if not isinstance(label, str) or not isinstance(entry, list) or len(entry) != 3:
+            continue
+        agent, model, extras = entry
+        if not isinstance(agent, str):
+            continue
+        if model is not None and not isinstance(model, str):
+            continue
+        if not isinstance(extras, list) or not all(isinstance(x, str) for x in extras):
+            continue
+        out[label] = (agent, model, tuple(extras))
+    return out
+
+
+def _find_project_models_override() -> Path | None:
+    """Walk up from cwd for a `.agent/models.json`. Returns first hit or None."""
+    cwd = Path.cwd()
+    for d in (cwd, *cwd.parents):
+        candidate = d / ".agent" / "models.json"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_model_aliases() -> dict[str, tuple[str, str | None, tuple[str, ...]]]:
+    """Plugin default + project override merged (project keys win)."""
+    aliases: dict[str, tuple[str, str | None, tuple[str, ...]]] = {}
+    default_path = Path(__file__).parent / "models.json"
+    if default_path.is_file():
+        aliases.update(_parse_models_json(default_path))
+    project_override = _find_project_models_override()
+    if project_override:
+        aliases.update(_parse_models_json(project_override))
+    return aliases
+
+
+MODEL_ALIASES: dict[str, tuple[str, str | None, tuple[str, ...]]] = _load_model_aliases()
+
+
+def resolve_model(model: str) -> tuple[str, str | None, tuple[str, ...]]:
+    """Map a `--model X` value to `(agent, canonical_model_or_None, extra_args)`.
+
+    Resolution order:
+      1. Direct alias hit in MODEL_ALIASES.
+      2. Pattern inference on canonical IDs:
+         - `claude-*` → claude
+         - `gpt-*` / `o1-*` / `o3-*` / `o4-*` → codex
+         - `gemini-*` → agy (drop model — agy has no `-m`)
+         - `vendor/model` (contains `/`) → pi via openrouter
+         - `qwen*` → pi via oss
+      3. No match → raise ValueError (caller must supply `--agent`).
+    """
+    if model in MODEL_ALIASES:
+        return MODEL_ALIASES[model]
+    if model.startswith("claude-"):
+        return ("claude", model, ())
+    if model in {"o1", "o3", "o4"} or model.startswith(("gpt-", "o1-", "o3-", "o4-")):
+        return ("codex", model, ())
+    if model.startswith("gemini-"):
+        return ("agy", None, ())  # agy has no -m; drop the model arg
+    if "/" in model:
+        return ("pi", model, ("--provider", "openrouter"))
+    if model.startswith("qwen"):
+        return ("pi", model, ("--provider", "oss"))
+    raise ValueError(
+        f"Cannot infer agent from model {model!r}. "
+        f"Pass --agent explicitly, or use one of: {', '.join(MODEL_ALIASES)}"
+    )
+
+
 # Top-level paths (non-home) that must be writable.
 _SYSTEM_RW_PATHS: tuple[str, ...] = (
     "/tmp",
@@ -289,6 +385,38 @@ def run(
     )
 
 
+def _inject_model_args(
+    agent: str,
+    model: str | None,
+    extras: tuple[str, ...],
+    forwarded: list[str],
+) -> list[str]:
+    """Prepend `--model <id>` (per-agent shape) and extras to forwarded argv.
+
+    Per-agent rules:
+      - claude / pi: prepend `--model <id>` and extras
+      - codex: insert `-m <id>` and extras AFTER the `exec` subcommand token
+      - agy: drop model entirely (no -m flag); prepend extras
+    """
+    extras_list = list(extras)
+    if model is None:
+        # No model flag for this agent — extras still go in.
+        if agent == "codex" and "exec" in forwarded:
+            idx = forwarded.index("exec") + 1
+            return forwarded[:idx] + extras_list + forwarded[idx:]
+        return extras_list + forwarded
+
+    if agent == "codex":
+        model_flag = ["-m", model] + extras_list
+        if "exec" in forwarded:
+            idx = forwarded.index("exec") + 1
+            return forwarded[:idx] + model_flag + forwarded[idx:]
+        return model_flag + forwarded
+
+    # claude / pi / agy-with-model: top-level --model
+    return ["--model", model] + extras_list + forwarded
+
+
 def _format_agent_matrix(agents: dict[str, AgentInfo]) -> str:
     rows = []
     for name in _AGENT_ORDER:
@@ -310,9 +438,15 @@ def _main(argv: list[str]) -> int:
 
     parser = argparse.ArgumentParser(prog="provider.sandbox", add_help=True)
     parser.add_argument("--agent", default=None,
-                        help="Agent to launch (default: auto-detect)")
+                        help="Agent to launch (default: auto-detect or inferred from --model)")
+    parser.add_argument("--model", default=None,
+                        help="Model alias (opus/sonnet/haiku/gpt/gemini/qwen/deepseek) "
+                             "OR canonical id (claude-*, gpt-*, gemini-*, vendor/model, qwen*). "
+                             "Auto-picks the agent unless --agent is given.")
     parser.add_argument("--list-agents", action="store_true",
                         help="Print capability matrix and exit")
+    parser.add_argument("--list-models", action="store_true",
+                        help="Print model alias table and exit")
     parser.add_argument("--print-profile", action="store_true",
                         help="Print seatbelt profile to stdout and exit")
     parser.add_argument("--rw", action="append", default=[],
@@ -329,16 +463,42 @@ def _main(argv: list[str]) -> int:
         print(_format_agent_matrix(detect_agents()))
         return 0
 
+    if args.list_models:
+        print("Model aliases (use with `bin/sandbox --model X`):")
+        for alias, (ag, model, extras) in MODEL_ALIASES.items():
+            tail = f" + {' '.join(extras)}" if extras else ""
+            print(f"  {alias:9s} -> --agent {ag}" + (f" --model {model}{tail}" if model else f"{tail} (no --model)"))
+        print("Plus canonical patterns: claude-*, gpt-/o1-/o3-/o4-*, gemini-*, vendor/model, qwen*")
+        return 0
+
     project = Path(args.project_root or Path.cwd()).resolve()
 
     if args.print_profile:
         print(build_seatbelt_profile(project, _git_dir_of(project), args.rw))
         return 0
 
-    agent = args.agent or default_agent()
     forwarded = list(args.agent_args)
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
+
+    # Resolve --model into (agent, canonical, extras). Validates against --agent.
+    if args.model is not None:
+        try:
+            inferred_agent, canonical_model, extras = resolve_model(args.model)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        if args.agent and args.agent != inferred_agent:
+            print(
+                f"Error: --agent {args.agent!r} conflicts with --model {args.model!r} "
+                f"(implies --agent {inferred_agent!r})",
+                file=sys.stderr,
+            )
+            return 2
+        agent = inferred_agent
+        forwarded = _inject_model_args(agent, canonical_model, extras, forwarded)
+    else:
+        agent = args.agent or default_agent()
 
     result = run(agent, forwarded, project, extra_rw=args.rw)
     return result.returncode

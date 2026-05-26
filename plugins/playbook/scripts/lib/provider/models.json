@@ -1,0 +1,13 @@
+{
+  "_doc": "Model aliases for bin/sandbox --model <alias>. Each entry is [agent, canonical_model_or_null, [extra_args]]. Model strings drift between releases — edit this file (or shadow with .agent/models.json in a project) when an upstream version changes. Schema is stable; only values move.",
+  "_updated": "2026-05-26",
+  "aliases": {
+    "opus":     ["claude", "claude-opus-4-7[1m]", []],
+    "sonnet":   ["claude", "claude-sonnet-4-6", []],
+    "haiku":    ["claude", "claude-haiku-4-5", []],
+    "gpt":      ["codex", "gpt-5.5", []],
+    "gemini":   ["agy", null, []],
+    "qwen":     ["pi", null, ["--provider", "oss"]],
+    "deepseek": ["pi", "deepseek/deepseek-v4-flash", ["--provider", "openrouter"]]
+  }
+}

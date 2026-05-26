@@ -26,7 +26,12 @@
 
 set -e
 
-# Find project root (where src/provider/sandbox.py lives) and python.
+# Playbook runtime is stdlib-only — any python3 ≥ 3.10 works.
+# See CLAUDE.md "Runtime invariant" and memory project-stdlib-only-runtime.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null \
+    || { echo "Playbook needs python3 >= 3.10 (found: $(python3 --version 2>&1))" >&2; exit 1; }
+
+# Find project root (where the provider/ module lives).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # scripts/sandbox lives at <root>/scripts; bin/sandbox is symlink to ../scripts/sandbox.
 # .claude/bin/sandbox lives at <root>/.claude/bin (when installed).
@@ -72,4 +77,16 @@ if [ "$NO_HOOKS" = true ]; then
     FWD=("${new_fwd[@]}")
 fi
 
-PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" exec python3 -m provider.sandbox "${FWD[@]}"
+# Resolve PYTHONPATH for both layouts:
+#   installed plugin: <plugin>/provider/  → PYTHONPATH=<plugin>
+#   dev repo:         <root>/src/provider/ → PYTHONPATH=<root>/src
+if [ -d "$PROJECT_ROOT/provider" ]; then
+    PLAYBOOK_PYPATH="$PROJECT_ROOT"
+elif [ -d "$PROJECT_ROOT/src/provider" ]; then
+    PLAYBOOK_PYPATH="$PROJECT_ROOT/src"
+else
+    echo "Error: provider/ module not found at $PROJECT_ROOT (tried 'provider/' and 'src/provider/')" >&2
+    exit 1
+fi
+
+PYTHONPATH="${PLAYBOOK_PYPATH}${PYTHONPATH:+:${PYTHONPATH}}" exec python3 -m provider.sandbox "${FWD[@]}"

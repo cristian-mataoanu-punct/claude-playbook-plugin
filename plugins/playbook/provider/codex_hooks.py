@@ -617,6 +617,23 @@ def _turn_baseline_file(project_root: Path, session_id: str, turn_id: str | None
     return session_dir / f"codex-dirty-baseline-{safe_turn_id}.json"
 
 
+def _stop_block_marker_file(project_root: Path, session_id: str, turn_id: str | None) -> Path:
+    """Marker recording that the Codex Stop hook already blocked once this turn.
+
+    Codex has NO stop-block cap — unlike Claude's `stop_hook_active`
+    self-release and the `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` runtime cap (2.1.143).
+    So a persistent block condition loops forever: e.g. a concurrent agent
+    editing the shared worktree, whose changes whole-tree `git status` can't
+    distinguish from this session's. We block at most once per turn, then
+    self-release. The marker is keyed by turn_id and reset on each new turn's
+    baseline so a genuinely new edit still gets nudged once.
+    """
+    safe_turn_id = _baseline_key(turn_id)
+    session_dir = project_root / ".agent" / "sessions" / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir / f"codex-stop-blocked-{safe_turn_id}.flag"
+
+
 def _chat_log_path(project_root: Path) -> Path:
     return project_root / ".agent" / "chat_log.md"
 
@@ -833,6 +850,14 @@ def save_turn_baseline(project_root: Path, session_id: str, turn_id: str | None)
         json.dumps(code_state(project_root), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    # Re-arm the per-turn stop-block self-release: a fresh turn may legitimately
+    # block once again. (Keyed by turn_id, so distinct turns are independent;
+    # this matters when turn_id is missing and degrades to a session key.)
+    marker = _stop_block_marker_file(project_root, session_id, turn_id)
+    try:
+        marker.unlink()
+    except (OSError, FileNotFoundError):
+        pass
     return baseline_file
 
 
@@ -891,11 +916,35 @@ def stop_decision_for_no_task_code_changes(
     session_id: str,
     turn_id: str | None,
 ) -> dict:
-    """Return the JSON response for Codex Stop hooks.
+    """Return the JSON response for Codex Stop hooks, capped at one block per turn.
 
     Missing turn identifiers degrade to a session-scoped baseline rather than
-    disabling enforcement silently.
+    disabling enforcement silently. **Self-release**: any block decision fires at
+    most once per turn — Codex has no stop-block cap (no `stop_hook_active`,
+    no `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`), so a persistent block condition (e.g. a
+    concurrent agent editing the shared worktree) would otherwise loop forever.
+    The marker is reset each new turn (`save_turn_baseline`), so a genuinely new
+    edit still gets nudged once. See `_stop_block_marker_file`.
     """
+    decision = _compute_stop_decision(project_root, session_id, turn_id)
+    if decision.get("decision") == "block":
+        marker = _stop_block_marker_file(project_root, session_id, turn_id)
+        if marker.exists():
+            return {}  # already nudged this turn — let the turn end
+        try:
+            marker.write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+    return decision
+
+
+def _compute_stop_decision(
+    project_root: Path,
+    session_id: str,
+    turn_id: str | None,
+) -> dict:
+    """Raw Codex stop evaluation (no self-release; wrapped by
+    stop_decision_for_no_task_code_changes)."""
     if has_active_task(project_root, session_id):
         return _active_task_stop_decision(project_root, session_id)
 

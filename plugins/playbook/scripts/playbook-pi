@@ -61,12 +61,13 @@ PROJECT_ROOT="$(find_project_root)"
 AGENT_DIR=""
 [ -n "$PROJECT_ROOT" ] && AGENT_DIR="$(resolve_agent_dir "$PROJECT_ROOT")"
 
-# Active models.json: per-project override if present, else shipped.
+# Allow-list source: ALWAYS the shipped models.json (single global source of
+# truth), so newly-added models propagate to every project on release. The
+# per-project config copy below is just pi's provider config, refreshed each
+# launch — it does NOT gate the allow-list (per-project default is set instead
+# via `<agent-dir>/pi/model`).
 SHIPPED_MODELS_JSON="$HOOK_DIR/playbook-pi-omlx-models.json"
 MODELS_JSON="$SHIPPED_MODELS_JSON"
-if [ -n "$AGENT_DIR" ] && [ -f "$AGENT_DIR/pi/config/models.json" ]; then
-  MODELS_JSON="$AGENT_DIR/pi/config/models.json"
-fi
 
 # Derive the allow-list (model ids) from the active models.json — single source
 # of truth. python3 is always available (stdlib only). Use a read loop (not
@@ -168,11 +169,10 @@ if [ -n "$PROJECT_ROOT" ]; then
   PI_CONFIG_DIR="$AGENT_DIR/pi/config"
   PI_SESSION_DIR="$AGENT_DIR/pi/sessions"
   mkdir -p "$PI_CONFIG_DIR" "$PI_SESSION_DIR" "$AGENT_DIR/sessions/$SESSION_ID"
-  # Seed the per-project models.json from the shipped one ONLY if absent, so a
-  # project's customized allow-list is never clobbered.
-  if [ ! -f "$PI_CONFIG_DIR/models.json" ]; then
-    cp "$SHIPPED_MODELS_JSON" "$PI_CONFIG_DIR/models.json"
-  fi
+  # Refresh pi's provider config from the shipped one every launch so new models
+  # / endpoint changes always propagate (this file is pi config, not the
+  # allow-list — that comes from the shipped json above).
+  cp "$SHIPPED_MODELS_JSON" "$PI_CONFIG_DIR/models.json"
   export PI_CODING_AGENT_DIR="$PI_CONFIG_DIR"
   export PI_CODING_AGENT_SESSION_DIR="$PI_SESSION_DIR"
 fi

@@ -217,18 +217,32 @@ class PiAdapter(ProviderAdapter):
 
     # ── Launch ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _wrapper_path() -> Optional[Path]:
+        """Locate the shipped `playbook-pi` launcher. Installed: `scripts/`
+        (next to the hooks). Dev: `bin/`. Walk up from this module looking in
+        both."""
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            for sub in ("scripts", "bin"):
+                cand = parent / sub / "playbook-pi"
+                if cand.exists():
+                    return cand
+        return None
+
     def launch_interactive(self, project_root: Path, **kwargs) -> int:
-        """Interactive pi session via omlx launch pi (preferred) or direct pi."""
-        import shutil
+        """Interactive pi session via the gate-hooked `playbook-pi` wrapper.
+
+        Delegates to the shipped wrapper so the programmatic launch path gets the
+        SAME hook adapter (`-e`), model allow-list, and config isolation as the
+        CLI path — `detect_capabilities()` advertises hooks, so launching hookless
+        pi here would be a footgun (impl-review T145 #2). Falls back to direct
+        `pi` only if the wrapper can't be found.
+        """
         env = os.environ.copy()
-        if shutil.which("omlx"):
-            result = subprocess.run(
-                ["omlx", "launch", "pi"], cwd=str(project_root), env=env, **kwargs,
-            )
-        else:
-            result = subprocess.run(
-                ["pi"], cwd=str(project_root), env=env, **kwargs,
-            )
+        wrapper = self._wrapper_path()
+        cmd = [str(wrapper)] if wrapper else ["pi"]
+        result = subprocess.run(cmd, cwd=str(project_root), env=env, **kwargs)
         return result.returncode
 
     def launch_headless(self, project_root: Path, prompt: str, **kwargs) -> str:

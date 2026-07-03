@@ -116,7 +116,7 @@ class ClaudeAdapter(ProviderAdapter):
         inv = self.headless_argv(prompt, model, context=system_context)
         # Judge-only extras layered on the core invocation.
         agent_args = inv.argv + [
-            "--max-budget-usd", "2",
+            "--max-budget-usd", "7",
             "--tools", tools,
             "--allowedTools", tools,
         ]

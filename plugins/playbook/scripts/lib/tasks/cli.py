@@ -1453,7 +1453,7 @@ def main():
             # The judge is a read-only evaluator sandboxed via provider.sandbox
             # (write containment via seatbelt/bwrap). PLAYBOOK_SESSION_ID=judge
             # above lets hooks identify judge sessions if needed.
-            claude_args = ["-p", "--max-budget-usd", "2"]
+            claude_args = ["-p", "--max-budget-usd", "7"]
             if model:
                 from provider.adapters.claude import ClaudeAdapter
                 claude_args += ["--model", ClaudeAdapter._MODEL_MAP.get(model, model)]
